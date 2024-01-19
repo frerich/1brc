@@ -1,3 +1,5 @@
+Mix.install([:benchee])
+
 defmodule M do
   def process(path, batch_size) do
     path
@@ -42,13 +44,34 @@ defmodule M do
     end)
   end
 
-  def parse_line(line) when is_binary(line) do
-    [station, temp] = String.split(line, ";", parts: 2)
-    {temp, ""} = Float.parse(temp)
-    {station, temp}
+  # Generate parsing functions for all required patterns
+  for city_length <- 1..30, whole_part_length <- 1..2 do
+    defp parse_line(<<city::binary-size(unquote(city_length)), ?;, ?-, whole_part::binary-size(unquote(whole_part_length)), ?., fractional_part::binary-1>>) do
+      {city, to_integer(whole_part) * -1 + to_integer(fractional_part) / 10}
+    end
+
+    defp parse_line(<<city::binary-size(unquote(city_length)), ?;, whole_part::binary-size(unquote(whole_part_length)), ?., fractional_part::binary-1>>) do
+      {city, to_integer(whole_part) + to_integer(fractional_part) / 10}
+    end
+  end
+
+  # Optimised string -> integer conversions for all required values
+  for i <- 0..99 do
+    defp to_integer(unquote(to_string(i))), do: unquote(i)
   end
 end
 
 path = "data/measurements_10M.txt"
-{runtime_ms, _} = :timer.tc(M, :process, [path, 1_000_000], :millisecond)
-IO.puts("#{runtime_ms}ms")
+
+{runtime_usecs, _} = :timer.tc(fn -> M.process(path, 1_000_000) end)
+IO.puts("Runtime: #{runtime_usecs}us")
+
+#:fprof.apply(M, :process, [path, 10_000])
+#:fprof.profile()
+#:fprof.analyse(:dest, 'outfile.fprof')
+
+#Benchee.run(%{
+#  "parse via String.split/3" => fn -> M.parse_line("Hamburg;13.4") end,
+#  "parse via Regex.run/2" => fn -> M.parse_line_via_regex("Hamburg;13.4") end,
+#  "parse via pattern matching" => fn -> M.parse_line_via_pattern_match("Hamburg;13.4") end
+#  })
