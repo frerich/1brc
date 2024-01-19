@@ -1,82 +1,54 @@
 defmodule M do
-  def slurp_and_split(filename) do
-    filename
-    |> File.read!()
-    |> String.split("\n")
-  end
+  def process(path, batch_size) do
+    path
+    |> File.stream!(65536)
+    |> binary_stream_to_lines()
+    |> Stream.chunk_every(batch_size)
+    |> Task.async_stream(fn lines ->
+      for line <- lines do
+        {station, measurement} = parse_line(line)
 
-  def slurp_and_recurse(filename) do
-    filename
-    |> File.read!()
-    |> parse_lines_2({[], []})
-  end
+        key = "station_#{station}"
 
-  defp parse_lines(<<>>, {buf, lines}) do
-    Enum.reverse([buf | lines])
-  end
+        {min, {sum, count}, max} = Process.get(key, {1000, {0, 0}, -1000})
 
-  defp parse_lines(<<?\n, rest::binary>>, {buf, lines}) do
-    parse_lines(rest, {[], [to_string(Enum.reverse(buf)) | lines]})
-  end
+        Process.put(key, {
+          min(min, measurement),
+          {sum + measurement, count + 1},
+          max(max, measurement)
+        })
+      end
 
-  defp parse_lines(<<char, rest::binary>>, {buf, lines}) do
-    parse_lines(rest, {[char | buf], lines})
-  end
-
-  defp parse_lines_2(data, {[], lines}) do
-    case String.split(data, "\n", parts: 2) do
-      [line, rest] -> parse_lines_2(rest, {[], [line | lines]})
-      [line] -> Enum.reverse([line | lines])
-    end
-  end
-
-  def via_io_device(filename) do
-    data = File.read!(filename)
-
-    {:ok, pid} = StringIO.open(data)
-
-    Stream.repeatedly(fn -> IO.binread(pid, :line) end)
-    |> Enum.take_while(& &1 != :eof)
-  end
-
-  def via_file_readline_stream(filename) do
-    File.open!(filename, [:read, :raw, {:read_ahead, 65536}], fn file ->
-      Stream.repeatedly(fn -> :file.read_line(file) end)
-      |> Enum.take_while(fn
-        {:ok, _line} -> true
-        _ -> false
+      for <<"station_", station::binary>> = key <- Process.get_keys(), into: %{} do
+      {station, Process.get(key)}
+      end
+    end)
+    |> Enum.reduce(%{}, fn {:ok, stats}, acc ->
+      Map.merge(acc, stats, fn _station, {min_a, {sum_a, count_a}, max_a}, {min_b, {sum_b, count_b}, max_b} ->
+        {min(min_a, min_b), {sum_a + sum_b, count_a + count_b}, max(max_a, max_b)}
       end)
     end)
+    |> Enum.sort_by(fn {station, _data} -> station end)
+    |> Enum.map_join("\n", fn {station, {min, {sum, count}, max}} ->
+      "#{station}=#{min}/#{Float.round(sum / count, 1)}/#{max}"
+    end)
+    |> IO.puts()
   end
 
-  def via_file_readline_stream_using_match(filename) do
-    File.open!(filename, [:read, :raw, {:read_ahead, 65536}], fn file ->
-      Stream.repeatedly(fn -> :file.read_line(file) end)
-      |> Enum.take_while(& match?({:ok, _line}, &1))
+  def binary_stream_to_lines(stream) do
+    Stream.transform(stream, "", fn binary, acc ->
+      [rest | lines] = Enum.reverse(String.split(acc <> binary, "\n"))
+      {Enum.reverse(lines), rest}
     end)
   end
 
-  def via_file_readline_manual_recursion(filename) do
-    File.open!(filename, [:read, :raw, {:read_ahead, 65536}], fn file ->
-      count_lines_2(file)
-    end)
-  end
-
-  defp count_lines_2(file, acc \\ []) do
-    case :file.read_line(file) do
-      {:ok, line} ->
-        count_lines_2(file, [line | acc])
-
-      _ ->
-        Enum.reverse(acc)
-    end
+  def parse_line(line) when is_binary(line) do
+    [station, temp] = String.split(line, ";", parts: 2)
+    {temp, ""} = Float.parse(temp)
+    {station, temp}
   end
 end
 
-filename = "data/measurements_10M.txt"
-:timer.tc(fn -> M.slurp_and_split("data/measurements_1B.txt") |> Enum.count() end) |> dbg()
-:timer.tc(fn -> M.slurp_and_recurse(filename) |> Enum.count() end) |> dbg()
-:timer.tc(fn -> M.via_io_device(filename) |> Enum.count() end) |> dbg()
-:timer.tc(fn -> M.via_file_readline_stream(filename) |> Enum.count() end) |> dbg()
-:timer.tc(fn -> M.via_file_readline_stream_using_match(filename) |> Enum.count() end) |> dbg()
-:timer.tc(fn -> M.via_file_readline_manual_recursion(filename) |> Enum.count() end) |> dbg()
+path = "data/measurements_10M.txt"
+{runtime_ms, _} = :timer.tc(M, :process, [path, 1_000_000], :millisecond)
+IO.puts("#{runtime_ms}ms")
